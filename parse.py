@@ -107,3 +107,5 @@ if __name__ == "__main__":
             if last_strokes:
                 print("Sample last strokes:", last_strokes[:3])  # Print first 3 for inspection
             parser.save_last_stroke_types_to_csv(f"last_stroke_types_{i}.csv")
+
+            
