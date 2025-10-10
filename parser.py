@@ -2,6 +2,8 @@ import json
 import pandas as pd
 
 class Parser:
+    NO_DATA_MSG = "No data loaded. Call load_data() first."
+
     def __init__(self, file_path):
         self.file_path = file_path
         self.data = None
@@ -26,7 +28,7 @@ class Parser:
     def print_basic_info(self):
         """Print basic match information"""
         if not self.data:
-            print("No data loaded. Call load_data() first.")
+            print(self.NO_DATA_MSG)
             return
         
         print("=== Basic Match Information ===")
@@ -37,7 +39,7 @@ class Parser:
     def analyze_points(self):
         """Analyze and print point-by-point information"""
         if not self.data:
-            print("No data loaded. Call load_data() first.")
+            print(self.NO_DATA_MSG)
             return
         
         print("\n=== Point Analysis ===")
@@ -57,7 +59,7 @@ class Parser:
     def extract_stroke_types(self):
         """Extract all stroke types from the data"""
         if not self.data:
-            print("No data loaded. Call load_data() first.")
+            print(self.NO_DATA_MSG)
             return
         
         self.stroke_types = []
@@ -65,7 +67,7 @@ class Parser:
         def traverse_json(data):
             if isinstance(data, dict):
                 for key, value in data.items():
-                    if key == "StrokeType":
+                    if key == "StrokeType" and value != "FAULT":
                         self.stroke_types.append(value)
                     if isinstance(value, (dict, list)):
                         traverse_json(value)
@@ -88,7 +90,7 @@ class Parser:
     def save_processed_data(self, output_file="output.json"):
         """Save processed data back to JSON"""
         if not self.data:
-            print("No data loaded. Call load_data() first.")
+            print(self.NO_DATA_MSG)
             return
         
         with open(output_file, 'w') as file:
@@ -102,28 +104,28 @@ if __name__ == "__main__":
         'json/2018-27-2R16-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-BLIBLI Indonesia Open-1080p.json'
     )
     parser2 = Parser(
-        'json\2018-38-5F-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Victor China Open-1080p.json'
+        'json/2018-38-5F-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Victor China Open-1080p.json'
     )
     parser3 = Parser(
-        'json\2019-04-3QF-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Daihatsu Indonesia Masters-1080p.json'
+        'json/2019-04-3QF-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Daihatsu Indonesia Masters-1080p.json'
     )
     parser4 = Parser(
-        'json\2019-15-5F-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Singapore Open 2019-1080p.json'
+        'json/2019-15-5F-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Singapore Open 2019-1080p.json'
     )
     parser5 = Parser(
-        'json\2019-20-6SF-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Sudirman Cup-1080p.json'
+        'json/2019-20-6SF-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Sudirman Cup-1080p.json'
     )
     parser6 = Parser(
         'json/2018-27-2R16-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-BLIBLI Indonesia Open-1080p.json'
     )
     parser7 = Parser(
-        'json\2019-38-5F-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Victor China Open-1080p.json'
+        'json/2019-38-5F-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-Victor China Open-1080p.json'
     )
     parser8 = Parser(
-        'json\2019-43-3QF-MS-Anthony Sinisuka GINTING (INA)-Kento Momota (JPN)-YONEX French Open-1080p-50fps.json'
+        'json/2019-43-3QF-MS-Anthony Sinisuka GINTING (INA)-Kento Momota (JPN)-YONEX French Open-1080p-50fps.json'
     )
     parser9 = Parser(
-        'json\2019-50-5F-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-HSBC BWF World Tour Finals-1080p.json'
+        'json/2019-50-5F-MS-Anthony Sinisuka GINTING (INA)-Kento MOMOTA (JPN)-HSBC BWF World Tour Finals-1080p.json'
     )
     
     # Load and process the data
