@@ -424,7 +424,7 @@ def main():
         "Shuttleset/set", 
         "ShuttleSet",
         "Shuttleset",
-        ".",  # Current directory
+        ".",
         "data",
         "dataset"
     ]
