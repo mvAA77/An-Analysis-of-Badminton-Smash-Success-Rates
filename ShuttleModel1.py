@@ -15,26 +15,20 @@ import seaborn as sns
 import matplotlib.patches as patches
 
 
-# ============================================================
 # CONSTANTS / CONFIG
-# ============================================================
-# keywords that mean "smash" in your data
+# keywords that mean "smash" in data
 SMASH_KEYWORDS = ["殺球", "點扣", "smash"]
 
-# if your dataset root is different, change this
-# e.g. DEFAULT_SET_FOLDER = "set" or "ShuttleSet/set"
 DEFAULT_SET_FOLDER = "ShuttleSet/set"
 
 OUTPUT_DIR = "smash_analysis"
 
-# court dimensions from the ShuttleSet paper / BWF
-COURT_WIDTH_M = 6.1    # left ↔ right
-COURT_LENGTH_M = 13.4  # near ↔ far (net in middle at 6.7)
+# court dimensions from the ShuttleSet
+COURT_WIDTH_M = 6.1
+COURT_LENGTH_M = 13.4
 
 
-# ============================================================
 # HELPERS: match mode, in/out, court drawing
-# ============================================================
 def infer_match_mode_from_name(match_name: str) -> str:
     """
     Infer singles vs doubles from the match/folder name string.
@@ -102,21 +96,8 @@ def draw_badminton_court(ax, mode="singles", width=6.1, length=13.4):
     ax.text(width / 2, net_y - 0.6, "Player Side", ha="center", fontsize=9)
 
 
-# ============================================================
-# 1) LOAD ALL CSVs LIKE YOUR ORIGINAL CODE
-# ============================================================
+# 1 LOAD ALL CSVs LIKE YOUR ORIGINAL CODE
 def load_all_sets(base_path: Path) -> pd.DataFrame:
-    """
-    Walks:
-        base_path/
-            match_1/
-                set1.csv
-                set2.csv
-            match_2/
-                ...
-    Returns one big DF with columns lowered and extra
-    __match_name, __set_file
-    """
     all_match_dfs = []
 
     if not base_path.exists():
@@ -154,9 +135,7 @@ def load_all_sets(base_path: Path) -> pd.DataFrame:
     return full_df
 
 
-# ============================================================
-# 2) GET RALLY WINNER (last row of each rally)
-# ============================================================
+# 2 GET RALLY WINNER (last row of each rally)
 def get_rally_winners(full_df: pd.DataFrame) -> pd.DataFrame:
     required = ["rally", "getpoint_player", "ball_round"]
     for c in required:
@@ -177,10 +156,7 @@ def get_rally_winners(full_df: pd.DataFrame) -> pd.DataFrame:
     )
     return rally_winners
 
-
-# ============================================================
-# 3) GET ALL SMASHES (not only last shot)
-# ============================================================
+# 3 GET ALL SMASHES (not only last shot)
 def get_all_smashes(full_df: pd.DataFrame, rally_winners: pd.DataFrame) -> pd.DataFrame:
     if "type" not in full_df.columns:
         raise ValueError("CSV missing 'type' column.")
@@ -210,9 +186,7 @@ def get_all_smashes(full_df: pd.DataFrame, rally_winners: pd.DataFrame) -> pd.Da
     return smashes
 
 
-# ============================================================
-# 4) BUILD FEATURES FROM SMASHES
-# ============================================================
+# 4 BUILD FEATURES FROM SMASHES
 def build_features_from_smashes(smashes: pd.DataFrame):
     needed = ["landing_x", "landing_y", "player_location_x", "player_location_y"]
     for col in needed:
@@ -245,9 +219,7 @@ def build_features_from_smashes(smashes: pd.DataFrame):
     return smashes, X, y, feature_cols
 
 
-# ============================================================
-# 5) TRAIN MODEL
-# ============================================================
+# 5 TRAIN MODEL
 def train_smash_model(X, y):
     if len(X) < 20:
         print("⚠️ Not enough smashes to train a model.")
@@ -274,9 +246,7 @@ def train_smash_model(X, y):
     return model
 
 
-# ============================================================
-# 6) PLOT PROBABILITY MAP (with singles/doubles + full court)
-# ============================================================
+# 6 PLOT PROBABILITY MAP (with singles/doubles + full court)
 def plot_probability_map(smashes: pd.DataFrame, model, feature_cols):
     if model is None:
         print("⚠️ Model is None, skipping probability map.")
@@ -296,7 +266,7 @@ def plot_probability_map(smashes: pd.DataFrame, model, feature_cols):
         print("⚠️ Not enough variation to build heatmap.")
         return
 
-    # pixel → meter scale
+    # pixel: meter scale
     x_range_px = px_x_max - px_x_min
     y_range_px = px_y_max - px_y_min
     x_scale = COURT_WIDTH_M / x_range_px
@@ -340,7 +310,6 @@ def plot_probability_map(smashes: pd.DataFrame, model, feature_cols):
     grid_x_m = (grid_x_px - px_x_min) * x_scale
     grid_y_m = (grid_y_px - px_y_min) * y_scale
 
-    # ---- plot ----
     plt.figure(figsize=(7, 5))
     ax = plt.gca()
 
@@ -385,9 +354,7 @@ def plot_probability_map(smashes: pd.DataFrame, model, feature_cols):
     plt.show()
 
 
-# ============================================================
-# 7) SAVE LABELED SMASHES
-# ============================================================
+# 7 SAVE LABELED SMASHES
 def save_smashes(smashes: pd.DataFrame, output_dir=OUTPUT_DIR):
     os.makedirs(output_dir, exist_ok=True)
     out_path = Path(output_dir) / "all_smashes_with_labels.csv"
@@ -395,9 +362,7 @@ def save_smashes(smashes: pd.DataFrame, output_dir=OUTPUT_DIR):
     print(f"✅ Saved labeled smashes to: {out_path}")
 
 
-# ============================================================
 # MAIN
-# ============================================================
 if __name__ == "__main__":
     BASE_DIR = Path(__file__).resolve().parent
     SET_PATH = BASE_DIR / DEFAULT_SET_FOLDER
