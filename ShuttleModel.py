@@ -101,17 +101,17 @@ def load_all_sets(base_path: Path) -> pd.DataFrame:
     all_match_dfs = []
 
     if not base_path.exists():
-        print(f"❌ Error: folder '{base_path}' not found.")
+        print(f"Error: folder '{base_path}' not found.")
         return pd.DataFrame()
 
-    print("📦 Loading all match/set CSVs...")
+    print("Loading all match/set CSVs...")
 
     for match_dir in base_path.iterdir():
         if not match_dir.is_dir():
             continue
 
         match_name = match_dir.name
-        print(f"\n📁 Match: {match_name}")
+        print(f"\nMatch: {match_name}")
 
         for set_file in match_dir.glob("*.csv"):
             try:
@@ -127,11 +127,11 @@ def load_all_sets(base_path: Path) -> pd.DataFrame:
             print(f"  ✓ {set_file.name}: {len(df)} rows")
 
     if not all_match_dfs:
-        print("⚠️ No CSVs found.")
+        print("No CSVs found.")
         return pd.DataFrame()
 
     full_df = pd.concat(all_match_dfs, ignore_index=True)
-    print(f"\n✅ Finished loading. Total rows: {len(full_df)}")
+    print(f"\nFinished loading. Total rows: {len(full_df)}")
     return full_df
 
 
@@ -166,7 +166,7 @@ def get_all_smashes(full_df: pd.DataFrame, rally_winners: pd.DataFrame) -> pd.Da
         lambda x: any(k.lower() in x.lower() for k in SMASH_KEYWORDS)
     )
     smashes = full_df[smash_mask].copy()
-    print(f"✅ Found {len(smashes)} smashes in all rallies")
+    print(f"Found {len(smashes)} smashes in all rallies")
 
     # attach rally winner to each smash
     smashes = smashes.merge(
@@ -215,15 +215,15 @@ def build_features_from_smashes(smashes: pd.DataFrame):
     X = smashes[feature_cols]
     y = smashes["smash_success"]
 
-    print(f"✅ Built features for {len(smashes)} smashes")
+    print(f"Built features for {len(smashes)} smashes")
     return smashes, X, y, feature_cols
 
 
 # 5 TRAIN MODEL
 def train_smash_model(X, y):
     if len(X) < 20:
-        print("⚠️ Not enough smashes to train a model.")
-        return None
+        print("Not enough smashes to train a model.")
+        return None, None, None, None, None
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.25, random_state=42, stratify=y
@@ -235,21 +235,38 @@ def train_smash_model(X, y):
     y_pred = model.predict(X_test)
     y_prob = model.predict_proba(X_test)[:, 1]
 
-    print("\n=== Smash Success Prediction Report (all smashes) ===")
-    print(classification_report(y_test, y_pred, digits=3))
+    report_txt = classification_report(y_test, y_pred, digits=3)
     try:
-        auc = roc_auc_score(y_test, y_prob)
-        print("AUC:", round(auc, 3))
+        auc_val = roc_auc_score(y_test, y_prob)
+        auc_txt = f"AUC: {auc_val:.3f}"
     except ValueError:
-        print("AUC could not be computed (only one class).")
+        auc_val = None
+        auc_txt = "AUC: not computed (one class)"
 
-    return model
+    # print to console
+    print("\n=== Smash Success Prediction Report (all smashes) ===")
+    print(report_txt)
+    print(auc_txt)
+
+    # write to file ONCE, safely inside the with
+    out_dir = Path("smash_analysis")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_path = out_dir / "metrics.txt"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("Smash Success Prediction Report\n")
+        f.write(report_txt)
+        f.write("\n" + auc_txt + "\n")
+
+    print(f"Saved model metrics to: {report_path.resolve()}")
+
+    # return everything you may want later
+    return model, y_test, y_pred, y_prob, auc_val
 
 
 # 6 PLOT PROBABILITY MAP (with singles/doubles + full court)
 def plot_probability_map(smashes: pd.DataFrame, model, feature_cols):
     if model is None:
-        print("⚠️ Model is None, skipping probability map.")
+        print("Model is None, skipping probability map.")
         return
 
     # infer mode (singles/doubles) per row
@@ -263,7 +280,7 @@ def plot_probability_map(smashes: pd.DataFrame, model, feature_cols):
     px_y_max = smashes["landing_y"].max()
 
     if px_x_min == px_x_max or px_y_min == px_y_max:
-        print("⚠️ Not enough variation to build heatmap.")
+        print("Not enough variation to build heatmap.")
         return
 
     # pixel: meter scale
@@ -351,6 +368,7 @@ def plot_probability_map(smashes: pd.DataFrame, model, feature_cols):
     ax.set_xlabel("Court width (m)")
     ax.set_ylabel("Court length / depth (m)")
     plt.tight_layout()
+    plt.savefig("smash_analysis/heatmap.png", dpi=300)
     plt.show()
 
 
@@ -359,7 +377,7 @@ def save_smashes(smashes: pd.DataFrame, output_dir=OUTPUT_DIR):
     os.makedirs(output_dir, exist_ok=True)
     out_path = Path(output_dir) / "all_smashes_with_labels.csv"
     smashes.to_csv(out_path, index=False, encoding="utf-8-sig")
-    print(f"✅ Saved labeled smashes to: {out_path}")
+    print(f"Saved labeled smashes to: {out_path}")
 
 
 # MAIN
@@ -368,19 +386,19 @@ if __name__ == "__main__":
     SET_PATH = BASE_DIR / DEFAULT_SET_FOLDER
 
     if not SET_PATH.exists():
-        print(f"⚠️ Default data folder not found at: {SET_PATH}")
+        print(f"Default data folder not found at: {SET_PATH}")
         alt_path = input("Enter the correct folder path for your badminton datasets: ").strip()
         if not alt_path:
-            print("❌ No valid path provided. Exiting.")
+            print("No valid path provided. Exiting.")
             exit(1)
         SET_PATH = Path(alt_path)
 
-    print(f"📂 Using data folder: {SET_PATH}")
+    print(f"Using data folder: {SET_PATH}")
 
     # 1. load everything
     full_df = load_all_sets(SET_PATH)
     if full_df.empty:
-        print("❌ No data loaded. Exiting.")
+        print("No data loaded. Exiting.")
         exit(1)
 
     # 2. rally winners
@@ -395,10 +413,13 @@ if __name__ == "__main__":
     print(f"\nTotal smashes (all): {len(smashes)}")
 
     # 5. train model
-    model = train_smash_model(X, y)
+    model, y_test, y_pred, y_prob, auc_val = train_smash_model(X, y)
 
     # 6. save data
     save_smashes(smashes, OUTPUT_DIR)
 
     # 7. plot
     plot_probability_map(smashes, model, feature_cols)
+
+
+
