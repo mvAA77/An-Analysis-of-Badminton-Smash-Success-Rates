@@ -1,404 +1,239 @@
 import os
 from pathlib import Path
+import argparse
+import sys
 
 import pandas as pd
 import numpy as np
 
-# make sure these are installed in your venv:
-#   pip install scikit-learn matplotlib seaborn
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV, GroupShuffleSplit
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.metrics import classification_report, roc_auc_score, precision_recall_curve, f1_score
 
 import matplotlib.pyplot as plt
-import seaborn as sns
 import matplotlib.patches as patches
+import seaborn as sns
 
 
-# CONSTANTS / CONFIG
-# keywords that mean "smash" in data
 SMASH_KEYWORDS = ["殺球", "點扣", "smash"]
-
 DEFAULT_SET_FOLDER = "ShuttleSet/set"
-
 OUTPUT_DIR = "smash_analysis"
 
-# court dimensions from the ShuttleSet
 COURT_WIDTH_M = 6.1
 COURT_LENGTH_M = 13.4
 
+DEFAULT_TARGET_PRECISION = 0.75
+USE_GROUP_SPLIT = True
+DROP_OUT_OF_COURT = False
+RANDOM_STATE = 42
 
-# HELPERS: match mode, in/out, court drawing
 def infer_match_mode_from_name(match_name: str) -> str:
-    """
-    Infer singles vs doubles from the match/folder name string.
-    This version works with Series.apply(...) on a single column.
-    """
     name_lower = str(match_name).lower()
     doubles_keywords = ["md", "wd", "xd", "double", "doubles", "mixed"]
-    if any(k in name_lower for k in doubles_keywords):
-        return "doubles"
-    return "singles"
-
-
+    return "doubles" if any(k in name_lower for k in doubles_keywords) else "singles"
 
 def is_in_rally_court(landing_x_m: float, landing_y_m: float, mode: str) -> bool:
-    """
-    Check IN/OUT for *rally* shots (not serve).
-    Singles: inner sidelines (0.46m in from each side), full length 13.4
-    Doubles: full width 6.1m, full length 13.4
-    """
     if mode == "doubles":
         return (0.0 <= landing_x_m <= COURT_WIDTH_M) and (0.0 <= landing_y_m <= COURT_LENGTH_M)
-    else:
-        # singles: playable area is between 0.46 and 6.1 - 0.46
-        left = 0.46
-        right = COURT_WIDTH_M - 0.46  # 6.1 - 0.46 = 5.64 → width = 5.18
-        return (left <= landing_x_m <= right) and (0.0 <= landing_y_m <= COURT_LENGTH_M)
-
+    left, right = 0.46, COURT_WIDTH_M - 0.46
+    return (left <= landing_x_m <= right) and (0.0 <= landing_y_m <= COURT_LENGTH_M)
 
 def draw_badminton_court(ax, mode="singles", width=6.1, length=13.4):
-    """
-    Draws a badminton court on the given axes.
-    mode = 'singles' -> draw inner sidelines
-    mode = 'doubles' -> draw full width
-    """
-    # outer boundary
-    outer = patches.Rectangle(
-        (0, 0), width, length,
-        linewidth=2,
-        edgecolor="black",
-        facecolor="none"
-    )
+    outer = patches.Rectangle((0, 0), width, length, linewidth=2, edgecolor="black", facecolor="none")
     ax.add_patch(outer)
-
-    # net line at 6.7m
     net_y = length / 2
     ax.axhline(net_y, color="black", linestyle="--", linewidth=2)
-
-    # short service lines (1.98m from net, both sides)
     ax.hlines([net_y - 1.98, net_y + 1.98], 0, width, colors="gray", linestyles="-", linewidth=1.2)
-
-    # center service line
     ax.vlines(width / 2, net_y - 1.98, net_y + 1.98, colors="gray", linestyles="-", linewidth=1.2)
-
     if mode == "singles":
-        # singles sidelines 0.46m in from each side
         ax.vlines([0.46, width - 0.46], 0, length, colors="gray", linestyles="-", linewidth=1.2)
-        # long service line for singles (for reference, 0.76m from back)
         ax.hlines([0.76, length - 0.76], 0.46, width - 0.46, colors="gray", linestyles="-", linewidth=1.0)
     else:
-        # doubles: full width; show long service line for doubles serve
         ax.hlines([0.76, length - 0.76], 0, width, colors="gray", linestyles=":", linewidth=1.0)
-
-    # labels
     ax.text(width / 2, net_y + 0.25, "Opponent Side", ha="center", fontsize=9)
     ax.text(width / 2, net_y - 0.6, "Player Side", ha="center", fontsize=9)
 
-
-# 1 LOAD ALL CSVs LIKE YOUR ORIGINAL CODE
 def load_all_sets(base_path: Path) -> pd.DataFrame:
     all_match_dfs = []
-
-    if not base_path.exists():
-        print(f"❌ Error: folder '{base_path}' not found.")
-        return pd.DataFrame()
-
-    print("📦 Loading all match/set CSVs...")
-
     for match_dir in base_path.iterdir():
         if not match_dir.is_dir():
             continue
-
-        match_name = match_dir.name
-        print(f"\n📁 Match: {match_name}")
-
         for set_file in match_dir.glob("*.csv"):
-            try:
-                df = pd.read_csv(set_file, encoding="utf-8-sig")
-            except Exception as e:
-                print(f"  ✗ Error reading {set_file}: {e}")
-                continue
-
+            df = pd.read_csv(set_file, encoding="utf-8-sig")
             df.columns = [c.strip().lower() for c in df.columns]
-            df["__match_name"] = match_name
+            df["__match_name"] = match_dir.name
             df["__set_file"] = set_file.name
             all_match_dfs.append(df)
-            print(f"  ✓ {set_file.name}: {len(df)} rows")
+    return pd.concat(all_match_dfs, ignore_index=True)
 
-    if not all_match_dfs:
-        print("⚠️ No CSVs found.")
-        return pd.DataFrame()
-
-    full_df = pd.concat(all_match_dfs, ignore_index=True)
-    print(f"\n✅ Finished loading. Total rows: {len(full_df)}")
-    return full_df
-
-
-# 2 GET RALLY WINNER (last row of each rally)
 def get_rally_winners(full_df: pd.DataFrame) -> pd.DataFrame:
-    required = ["rally", "getpoint_player", "ball_round"]
-    for c in required:
-        if c not in full_df.columns:
-            raise ValueError(f"Dataset missing required column: {c}")
-
-    full_df = full_df.sort_values(
-        ["__match_name", "__set_file", "rally", "ball_round"],
-        ascending=True
-    )
-
+    full_df = full_df.sort_values(["__match_name", "__set_file", "rally", "ball_round"], ascending=True)
     rally_winners = (
-        full_df
-        .groupby(["__match_name", "__set_file", "rally"])
+        full_df.groupby(["__match_name", "__set_file", "rally"])
         .tail(1)[["__match_name", "__set_file", "rally", "getpoint_player"]]
         .rename(columns={"getpoint_player": "rally_winner"})
-        .copy()
     )
     return rally_winners
 
-# 3 GET ALL SMASHES (not only last shot)
 def get_all_smashes(full_df: pd.DataFrame, rally_winners: pd.DataFrame) -> pd.DataFrame:
-    if "type" not in full_df.columns:
-        raise ValueError("CSV missing 'type' column.")
-
-    # filter all smash rows
-    smash_mask = full_df["type"].astype(str).apply(
-        lambda x: any(k.lower() in x.lower() for k in SMASH_KEYWORDS)
-    )
-    smashes = full_df[smash_mask].copy()
-    print(f"✅ Found {len(smashes)} smashes in all rallies")
-
-    # attach rally winner to each smash
-    smashes = smashes.merge(
-        rally_winners,
-        on=["__match_name", "__set_file", "rally"],
-        how="left",
-        validate="m:1"
-    )
-
-    # label success: did the smasher's side win?
-    smashes["smash_success"] = np.where(
-        smashes["player"].astype(str) == smashes["rally_winner"].astype(str),
-        1,
-        0
-    )
-
+    mask = full_df["type"].astype(str).apply(lambda x: any(k.lower() in x.lower() for k in SMASH_KEYWORDS))
+    smashes = full_df[mask].copy()
+    smashes = smashes.merge(rally_winners, on=["__match_name", "__set_file", "rally"], how="left")
+    smashes["smash_success"] = (smashes["player"].astype(str) == smashes["rally_winner"].astype(str)).astype(int)
     return smashes
 
-
-# 4 BUILD FEATURES FROM SMASHES
 def build_features_from_smashes(smashes: pd.DataFrame):
-    needed = ["landing_x", "landing_y", "player_location_x", "player_location_y"]
-    for col in needed:
-        if col not in smashes.columns:
-            raise ValueError(
-                f"Column '{col}' not found in your CSVs. "
-                f"Make sure all set files export coordinates."
-            )
-
-    smashes = smashes.dropna(subset=needed).copy()
-
-    # distance feature (still pixels)
-    smashes["distance_to_birdie"] = np.sqrt(
-        (smashes["landing_x"] - smashes["player_location_x"]) ** 2 +
-        (smashes["landing_y"] - smashes["player_location_y"]) ** 2
+    smashes = smashes.dropna(subset=["landing_x", "landing_y", "player_location_x", "player_location_y"]).copy()
+    px_x_min, px_x_max = smashes["landing_x"].min(), smashes["landing_x"].max()
+    px_y_min, px_y_max = smashes["landing_y"].min(), smashes["landing_y"].max()
+    x_scale = COURT_WIDTH_M / (px_x_max - px_x_min)
+    y_scale = COURT_LENGTH_M / (px_y_max - px_y_min)
+    for c in ["landing_x", "player_location_x"]:
+        smashes[c + "_m"] = (smashes[c] - px_x_min) * x_scale
+    for c in ["landing_y", "player_location_y"]:
+        smashes[c + "_m"] = (smashes[c] - px_y_min) * y_scale
+    smashes["distance_to_birdie_m"] = np.sqrt(
+        (smashes["landing_x_m"] - smashes["player_location_x_m"]) ** 2 +
+        (smashes["landing_y_m"] - smashes["player_location_y_m"]) ** 2
     )
-
-    feature_cols = [
-        "landing_x",
-        "landing_y",
-        "player_location_x",
-        "player_location_y",
-        "distance_to_birdie",
-    ]
-
-    X = smashes[feature_cols]
-    y = smashes["smash_success"]
-
-    print(f"✅ Built features for {len(smashes)} smashes")
-    return smashes, X, y, feature_cols
-
-
-# 5 TRAIN MODEL
-def train_smash_model(X, y):
-    if len(X) < 20:
-        print("⚠️ Not enough smashes to train a model.")
-        return None
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=42, stratify=y
-    )
-
-    model = LogisticRegression(max_iter=300)
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    y_prob = model.predict_proba(X_test)[:, 1]
-
-    print("\n=== Smash Success Prediction Report (all smashes) ===")
-    print(classification_report(y_test, y_pred, digits=3))
-    try:
-        auc = roc_auc_score(y_test, y_prob)
-        print("AUC:", round(auc, 3))
-    except ValueError:
-        print("AUC could not be computed (only one class).")
-
-    return model
-
-
-# 6 PLOT PROBABILITY MAP (with singles/doubles + full court)
-def plot_probability_map(smashes: pd.DataFrame, model, feature_cols):
-    if model is None:
-        print("⚠️ Model is None, skipping probability map.")
-        return
-
-    # infer mode (singles/doubles) per row
-    smashes = smashes.copy()
+    smashes["depth_m"] = smashes["landing_y_m"]
+    smashes["width_m"] = smashes["landing_x_m"]
+    smashes["to_center_m"] = np.abs(smashes["landing_x_m"] - (COURT_WIDTH_M / 2))
+    smashes["to_back_m"] = COURT_LENGTH_M - smashes["landing_y_m"]
+    smashes["depth_x_width"] = smashes["landing_y_m"] * smashes["to_center_m"]
     smashes["match_mode"] = smashes["__match_name"].apply(infer_match_mode_from_name)
+    smashes["in_court"] = smashes.apply(lambda r: is_in_rally_court(r["landing_x_m"], r["landing_y_m"], r["match_mode"]), axis=1)
+    smashes["in_court_flag"] = smashes["in_court"].astype(int)
+    feature_cols = [
+        "landing_x_m", "landing_y_m", "player_location_x_m", "player_location_y_m",
+        "distance_to_birdie_m", "to_center_m", "to_back_m", "depth_m", "width_m",
+        "depth_x_width", "in_court_flag"
+    ]
+    return smashes, smashes[feature_cols], smashes["smash_success"].astype(int), feature_cols
 
-    # get pixel ranges from your data
-    px_x_min = smashes["landing_x"].min()
-    px_x_max = smashes["landing_x"].max()
-    px_y_min = smashes["landing_y"].min()
-    px_y_max = smashes["landing_y"].max()
+def split_train_test(smashes, X, y):
+    if USE_GROUP_SPLIT:
+        groups = smashes["__match_name"]
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=RANDOM_STATE)
+        train_idx, test_idx = next(gss.split(X, y, groups=groups))
+        return X.iloc[train_idx], X.iloc[test_idx], y.iloc[train_idx], y.iloc[test_idx]
+    return train_test_split(X, y, test_size=0.25, random_state=RANDOM_STATE, stratify=y)
 
-    if px_x_min == px_x_max or px_y_min == px_y_max:
-        print("⚠️ Not enough variation to build heatmap.")
-        return
+def select_threshold(y_true, y_prob, mode="precision", target_precision=DEFAULT_TARGET_PRECISION):
+    prec, rec, thr = precision_recall_curve(y_true, y_prob)
+    if mode == "precision":
+        sel_idx = next((i for i, p in enumerate(prec) if p >= target_precision), len(thr) - 1)
+        return float(thr[max(0, min(sel_idx, len(thr) - 1))]), prec, rec, thr, sel_idx
+    f1s = [f1_score(y_true, (y_prob >= t).astype(int)) for t in thr]
+    idx = int(np.argmax(f1s))
+    return float(thr[idx]), prec, rec, thr, idx
 
-    # pixel: meter scale
-    x_range_px = px_x_max - px_x_min
-    y_range_px = px_y_max - px_y_min
-    x_scale = COURT_WIDTH_M / x_range_px
-    y_scale = COURT_LENGTH_M / y_range_px
-
-    # build grid in PIXELS
-    grid_x_px = np.linspace(px_x_min, px_x_max, 60)
-    grid_y_px = np.linspace(px_y_min, px_y_max, 60)
-    pts = [(gx, gy) for gx in grid_x_px for gy in grid_y_px]
-    grid = pd.DataFrame(pts, columns=["landing_x", "landing_y"])
-
-    # average player pos (pixels)
-    avg_player_x_px = smashes["player_location_x"].mean()
-    avg_player_y_px = smashes["player_location_y"].mean()
-    grid["player_location_x"] = avg_player_x_px
-    grid["player_location_y"] = avg_player_y_px
-    grid["distance_to_birdie"] = np.sqrt(
-        (grid["landing_x"] - grid["player_location_x"]) ** 2 +
-        (grid["landing_y"] - grid["player_location_y"]) ** 2
-    )
-
-    # predict in pixel space
-    grid["pred_prob"] = model.predict_proba(grid[feature_cols])[:, 1]
-
-    # convert to meters for plotting
-    grid["landing_x_m"] = (grid["landing_x"] - px_x_min) * x_scale
-    grid["landing_y_m"] = (grid["landing_y"] - px_y_min) * y_scale
-
-    smashes_plot = smashes.copy()
-    smashes_plot["landing_x_m"] = (smashes_plot["landing_x"] - px_x_min) * x_scale
-    smashes_plot["landing_y_m"] = (smashes_plot["landing_y"] - px_y_min) * y_scale
-
-    # mark which smashes are actually in for *their* mode
-    smashes_plot["in_court"] = smashes_plot.apply(
-        lambda r: is_in_rally_court(r["landing_x_m"], r["landing_y_m"], r["match_mode"]),
-        axis=1
-    )
-
-    # reshape prob grid
-    Z = grid["pred_prob"].values.reshape(len(grid_x_px), len(grid_y_px))
-    grid_x_m = (grid_x_px - px_x_min) * x_scale
-    grid_y_m = (grid_y_px - px_y_min) * y_scale
-
-    plt.figure(figsize=(7, 5))
-    ax = plt.gca()
-
-    # heatmap
-    cs = ax.contourf(grid_x_m, grid_y_m, Z.T, levels=20, cmap="RdYlGn")
-    plt.colorbar(cs, label="P(smash wins rally)")
-
-    # in-court smashes
-    sns.scatterplot(
-        data=smashes_plot[smashes_plot["in_court"]],
-        x="landing_x_m",
-        y="landing_y_m",
-        hue="smash_success",
-        palette="coolwarm",
-        alpha=0.6,
-        edgecolor="k",
-        legend=False,
-        ax=ax
-    )
-
-    # out-of-court-for-that-mode smashes
-    out_df = smashes_plot[~smashes_plot["in_court"]]
-    if not out_df.empty:
-        ax.scatter(
-            out_df["landing_x_m"],
-            out_df["landing_y_m"],
-            marker="x",
-            color="red",
-            label="Out (by mode)",
-            alpha=0.9
-        )
-
-    # draw singles court overlay (most matches will be singles)
-    draw_badminton_court(ax, mode="singles", width=COURT_WIDTH_M, length=COURT_LENGTH_M)
-
-    ax.set_xlim(0, COURT_WIDTH_M)
-    ax.set_ylim(0, COURT_LENGTH_M)
-    ax.set_title("Smash Win Probability (mode-aware, with court overlay)")
-    ax.set_xlabel("Court width (m)")
-    ax.set_ylabel("Court length / depth (m)")
+def train_smash_model_with_threshold(X, y, threshold_mode="precision", target_precision=DEFAULT_TARGET_PRECISION):
+    X_train, X_test, y_train, y_test = split_train_test(smashes_global, X, y)
+    pipe = Pipeline([("scaler", StandardScaler()), ("lr", LogisticRegression(max_iter=1000, solver="lbfgs", random_state=RANDOM_STATE))])
+    grid = GridSearchCV(pipe, {"lr__C": [0.01, 0.1, 1.0, 3.0, 10.0]}, scoring="roc_auc", cv=5, n_jobs=-1)
+    grid.fit(X_train, y_train)
+    best = grid.best_estimator_
+    y_prob = best.predict_proba(X_test)[:, 1]
+    best_thr, prec, rec, thr, idx = select_threshold(y_test, y_prob, threshold_mode, target_precision)
+    y_pred = (y_prob >= best_thr).astype(int)
+    print(f"\n=== Smash Prediction ({threshold_mode} mode) ===")
+    print(f"Chosen threshold: {best_thr:.3f}")
+    print(classification_report(y_test, y_pred, digits=3))
+    print("AUC:", round(roc_auc_score(y_test, y_prob), 3))
+    plt.figure(figsize=(6, 4))
+    plt.plot(rec[:-1], prec[:-1], label="Precision–Recall")
+    plt.scatter(rec[idx], prec[idx], color="red", label="Chosen threshold")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title(f"PR Curve ({threshold_mode} mode)")
+    plt.legend()
     plt.tight_layout()
     plt.show()
+    return best, best_thr
 
+def plot_probability_map(smashes, model, feature_cols, show_points=True, save_name=None):
+    grid_x_m = np.linspace(0, COURT_WIDTH_M, 120)
+    grid_y_m = np.linspace(0, COURT_LENGTH_M, 120)
+    grid = pd.DataFrame([(gx, gy) for gx in grid_x_m for gy in grid_y_m], columns=["landing_x_m", "landing_y_m"])
+    grid["player_location_x_m"] = smashes["player_location_x_m"].mean()
+    grid["player_location_y_m"] = smashes["player_location_y_m"].mean()
+    grid["distance_to_birdie_m"] = np.sqrt((grid["landing_x_m"] - grid["player_location_x_m"])**2 + (grid["landing_y_m"] - grid["player_location_y_m"])**2)
+    grid["depth_m"] = grid["landing_y_m"]
+    grid["width_m"] = grid["landing_x_m"]
+    grid["to_center_m"] = np.abs(grid["landing_x_m"] - (COURT_WIDTH_M/2))
+    grid["to_back_m"] = COURT_LENGTH_M - grid["landing_y_m"]
+    grid["depth_x_width"] = grid["landing_y_m"] * grid["to_center_m"]
+    grid["in_court_flag"] = 1
+    Z = model.predict_proba(grid[feature_cols])[:, 1].reshape(len(grid_x_m), len(grid_y_m))
+    aspect = COURT_LENGTH_M / COURT_WIDTH_M
+    fig, ax = plt.subplots(figsize=(8, 8 * aspect), dpi=120)
+    cs = ax.contourf(grid_x_m, grid_y_m, Z.T, levels=30, cmap="RdYlGn")
+    plt.colorbar(cs, ax=ax, label="P(smash wins rally)")
+    if show_points:
+        sns.scatterplot(data=smashes, x="landing_x_m", y="landing_y_m", hue="smash_success", palette="coolwarm", alpha=0.6, edgecolor="k", legend=False, ax=ax)
+    draw_badminton_court(ax, mode="singles", width=COURT_WIDTH_M, length=COURT_LENGTH_M)
+    ax.set_xlim(0, COURT_WIDTH_M)
+    ax.set_ylim(0, COURT_LENGTH_M)
+    ax.set_aspect('equal', adjustable='box')
+    plt.tight_layout()
+    if save_name:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        fig.savefig(Path(OUTPUT_DIR)/save_name, bbox_inches='tight')
+    plt.show()
 
-# 7 SAVE LABELED SMASHES
-def save_smashes(smashes: pd.DataFrame, output_dir=OUTPUT_DIR):
+def save_smashes(smashes, output_dir=OUTPUT_DIR):
     os.makedirs(output_dir, exist_ok=True)
-    out_path = Path(output_dir) / "all_smashes_with_labels.csv"
-    smashes.to_csv(out_path, index=False, encoding="utf-8-sig")
-    print(f"✅ Saved labeled smashes to: {out_path}")
+    smashes.to_csv(Path(output_dir)/"all_smashes_with_labels.csv", index=False, encoding="utf-8-sig")
 
-
-# MAIN
-if __name__ == "__main__":
-    BASE_DIR = Path(__file__).resolve().parent
-    SET_PATH = BASE_DIR / DEFAULT_SET_FOLDER
-
-    if not SET_PATH.exists():
-        print(f"⚠️ Default data folder not found at: {SET_PATH}")
-        alt_path = input("Enter the correct folder path for your badminton datasets: ").strip()
-        if not alt_path:
-            print("❌ No valid path provided. Exiting.")
-            exit(1)
-        SET_PATH = Path(alt_path)
-
-    print(f"📂 Using data folder: {SET_PATH}")
-
-    # 1. load everything
-    full_df = load_all_sets(SET_PATH)
-    if full_df.empty:
-        print("❌ No data loaded. Exiting.")
-        exit(1)
-
-    # 2. rally winners
-    rally_winners = get_rally_winners(full_df)
-
-    # 3. all smashes (anywhere in rally)
-    smashes = get_all_smashes(full_df, rally_winners)
-
-    # 4. build features
+def selftest_run():
+    print("Running synthetic data test...")
+    n = 300
+    rng = np.random.default_rng(RANDOM_STATE)
+    df = pd.DataFrame({
+        "type": rng.choice(["clear", "drop", "smash"], size=n, p=[0.2, 0.2, 0.6]),
+        "landing_x": rng.normal(500, 150, size=n),
+        "landing_y": rng.normal(800, 200, size=n),
+        "player_location_x": rng.normal(300, 120, size=n),
+        "player_location_y": rng.normal(200, 120, size=n),
+        "player": rng.choice(["A", "B"], size=n),
+        "getpoint_player": rng.choice(["A", "B"], size=n),
+        "rally": rng.integers(1, 51, size=n),
+        "ball_round": rng.integers(1, 10, size=n),
+        "__match_name": rng.choice(["match1_MD", "match2_MS"], size=n),
+        "__set_file": rng.choice(["set1.csv", "set2.csv"], size=n),
+    })
+    rally_w = get_rally_winners(df)
+    smashes = get_all_smashes(df, rally_w)
     smashes, X, y, feature_cols = build_features_from_smashes(smashes)
+    global smashes_global; smashes_global = smashes
+    model, thr = train_smash_model_with_threshold(X, y, threshold_mode="precision", target_precision=0.7)
+    save_smashes(smashes)
+    plot_probability_map(smashes, model, feature_cols, show_points=True, save_name="selftest_with_dots.png")
+    plot_probability_map(smashes, model, feature_cols, show_points=False, save_name="selftest_clean.png")
+    print("Self-test complete.")
 
-    print(f"\nTotal smashes (all): {len(smashes)}")
-
-    # 5. train model
-    model = train_smash_model(X, y)
-
-    # 6. save data
-    save_smashes(smashes, OUTPUT_DIR)
-
-    # 7. plot
-    plot_probability_map(smashes, model, feature_cols)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=str, default=None)
+    parser.add_argument("--threshold-mode", choices=["precision", "f1"], default="precision")
+    parser.add_argument("--target-precision", type=float, default=DEFAULT_TARGET_PRECISION)
+    parser.add_argument("--selftest", action="store_true")
+    args = parser.parse_args()
+    if args.selftest:
+        selftest_run()
+        sys.exit(0)
+    BASE_DIR = Path(__file__).resolve().parent
+    SET_PATH = Path(args.data) if args.data else BASE_DIR/DEFAULT_SET_FOLDER
+    full_df = load_all_sets(SET_PATH)
+    rally_winners = get_rally_winners(full_df)
+    smashes = get_all_smashes(full_df, rally_winners)
+    smashes, X, y, feature_cols = build_features_from_smashes(smashes)
+    global smashes_global; smashes_global = smashes
+    model, prob_thr = train_smash_model_with_threshold(X, y, threshold_mode=args.threshold_mode, target_precision=args.target_precision)
+    save_smashes(smashes)
+    plot_probability_map(smashes, model, feature_cols, show_points=True, save_name="prob_map_with_dots.png")
+    plot_probability_map(smashes, model, feature_cols, show_points=False, save_name="prob_map_clean.png")
+    print
