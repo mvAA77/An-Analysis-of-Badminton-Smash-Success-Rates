@@ -14,7 +14,6 @@ from sklearn.metrics import classification_report, roc_auc_score, precision_reca
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import seaborn as sns
 
 
 SMASH_KEYWORDS = ["殺球", "點扣", "smash"]
@@ -24,7 +23,7 @@ OUTPUT_DIR = "smash_analysis"
 COURT_WIDTH_M = 6.1
 COURT_LENGTH_M = 13.4
 
-DEFAULT_TARGET_PRECISION = 0.75
+DEFAULT_TARGET_PRECISION = 0.85
 USE_GROUP_SPLIT = True
 DROP_OUT_OF_COURT = False
 RANDOM_STATE = 42
@@ -78,11 +77,33 @@ def get_rally_winners(full_df: pd.DataFrame) -> pd.DataFrame:
     return rally_winners
 
 def get_all_smashes(full_df: pd.DataFrame, rally_winners: pd.DataFrame) -> pd.DataFrame:
-    mask = full_df["type"].astype(str).apply(lambda x: any(k.lower() in x.lower() for k in SMASH_KEYWORDS))
-    smashes = full_df[mask].copy()
-    smashes = smashes.merge(rally_winners, on=["__match_name", "__set_file", "rally"], how="left")
-    smashes["smash_success"] = (smashes["player"].astype(str) == smashes["rally_winner"].astype(str)).astype(int)
-    return smashes
+    df = full_df.copy()
+    df["ball_round"] = pd.to_numeric(df["ball_round"], errors="coerce")
+
+    last_shots = (
+        df.sort_values(["__match_name", "__set_file", "rally", "ball_round"], ascending=True)
+          .groupby(["__match_name", "__set_file", "rally"], as_index=False)
+          .tail(1)
+          .copy()
+    )
+
+    def is_smash_type(x: str) -> bool:
+        s = str(x).lower()
+        return any(k.lower() in s for k in SMASH_KEYWORDS)
+
+    last_smashes = last_shots[last_shots["type"].astype(str).apply(is_smash_type)].copy()
+
+    last_smashes = last_smashes.merge(
+        rally_winners,
+        on=["__match_name", "__set_file", "rally"],
+        how="left"
+    )
+    last_smashes["smash_success"] = (
+        last_smashes["player"].astype(str) == last_smashes["rally_winner"].astype(str)
+    ).astype(int)
+
+    return last_smashes
+
 
 def build_features_from_smashes(smashes: pd.DataFrame):
     smashes = smashes.dropna(subset=["landing_x", "landing_y", "player_location_x", "player_location_y"]).copy()
@@ -124,35 +145,68 @@ def split_train_test(smashes, X, y):
 def select_threshold(y_true, y_prob, mode="precision", target_precision=DEFAULT_TARGET_PRECISION):
     prec, rec, thr = precision_recall_curve(y_true, y_prob)
     if mode == "precision":
-        sel_idx = next((i for i, p in enumerate(prec) if p >= target_precision), len(thr) - 1)
-        return float(thr[max(0, min(sel_idx, len(thr) - 1))]), prec, rec, thr, sel_idx
-    f1s = [f1_score(y_true, (y_prob >= t).astype(int)) for t in thr]
+        p = prec[1:]
+        r = rec[1:]
+        t = thr
+
+        valid = np.where(p >= target_precision)[0]
+        if len(valid) == 0:
+            f1s = 2 * (p * r) / (p + r + 1e-9)
+            idx = int(np.argmax(f1s))
+            return float(t[idx]), prec, rec, thr, idx + 1
+
+        best_i = valid[np.argmax(r[valid])]
+        return float(t[best_i]), prec, rec, thr, best_i + 1
+
+    p = prec[1:]
+    r = rec[1:]
+    t = thr
+    f1s = 2 * (p * r) / (p + r + 1e-9)
     idx = int(np.argmax(f1s))
-    return float(thr[idx]), prec, rec, thr, idx
+    return float(t[idx]), prec, rec, thr, idx + 1
+
 
 def train_smash_model_with_threshold(X, y, threshold_mode="precision", target_precision=DEFAULT_TARGET_PRECISION):
     X_train, X_test, y_train, y_test = split_train_test(smashes_global, X, y)
-    pipe = Pipeline([("scaler", StandardScaler()), ("lr", LogisticRegression(max_iter=1000, solver="lbfgs", random_state=RANDOM_STATE))])
-    grid = GridSearchCV(pipe, {"lr__C": [0.01, 0.1, 1.0, 3.0, 10.0]}, scoring="roc_auc", cv=5, n_jobs=-1)
+    pipe = Pipeline([("scaler", StandardScaler()), ("lr", LogisticRegression(max_iter=1000, solver="lbfgs", class_weight={0: 1.0, 1: 2.0}, random_state=RANDOM_STATE))])
+    grid = GridSearchCV(pipe, {"lr__C": [0.01, 0.1, 1.0, 3.0, 10.0]}, scoring="roc_auc", cv=5, n_jobs=1)
     grid.fit(X_train, y_train)
     best = grid.best_estimator_
     y_prob = best.predict_proba(X_test)[:, 1]
-    best_thr, prec, rec, thr, idx = select_threshold(y_test, y_prob, threshold_mode, target_precision)
-    y_pred = (y_prob >= best_thr).astype(int)
-    print(f"\n=== Smash Prediction ({threshold_mode} mode) ===")
-    print(f"Chosen threshold: {best_thr:.3f}")
-    print(classification_report(y_test, y_pred, digits=3))
-    print("AUC:", round(roc_auc_score(y_test, y_prob), 3))
+
+    from sklearn.metrics import precision_recall_curve
+    import numpy as np
+
+    precision, recall, thresholds = precision_recall_curve(y_test, y_prob)
+
+    f1 = 2 * (precision * recall) / (precision + recall + 1e-9)
+    best_idx = np.argmax(f1)
+
+    best_threshold = thresholds[best_idx - 1]
+
+    print("Using F1-optimized threshold:", best_threshold)
+
+    y_pred = (y_prob >= best_threshold).astype(int)
+
+    from sklearn.metrics import classification_report, roc_auc_score
+    print(classification_report(y_test, y_pred))
+    print("AUC:", roc_auc_score(y_test, y_prob))
+
+
+
     plt.figure(figsize=(6, 4))
-    plt.plot(rec[:-1], prec[:-1], label="Precision–Recall")
-    plt.scatter(rec[idx], prec[idx], color="red", label="Chosen threshold")
+    plt.plot(recall, precision, label="Precision–Recall")
+    plt.scatter(recall[best_idx], precision[best_idx], color="red", label="Chosen threshold")
+
     plt.xlabel("Recall")
     plt.ylabel("Precision")
     plt.title(f"PR Curve ({threshold_mode} mode)")
     plt.legend()
     plt.tight_layout()
-    plt.show()
-    return best, best_thr
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    plt.savefig(Path(OUTPUT_DIR) / "pr_curve.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    return best, best_idx
 
 def plot_probability_map(smashes, model, feature_cols, show_points=True, save_name=None):
     grid_x_m = np.linspace(0, COURT_WIDTH_M, 120)
@@ -168,12 +222,24 @@ def plot_probability_map(smashes, model, feature_cols, show_points=True, save_na
     grid["depth_x_width"] = grid["landing_y_m"] * grid["to_center_m"]
     grid["in_court_flag"] = 1
     Z = model.predict_proba(grid[feature_cols])[:, 1].reshape(len(grid_x_m), len(grid_y_m))
+
     aspect = COURT_LENGTH_M / COURT_WIDTH_M
     fig, ax = plt.subplots(figsize=(8, 8 * aspect), dpi=120)
     cs = ax.contourf(grid_x_m, grid_y_m, Z.T, levels=30, cmap="RdYlGn")
     plt.colorbar(cs, ax=ax, label="P(smash wins rally)")
     if show_points:
-        sns.scatterplot(data=smashes, x="landing_x_m", y="landing_y_m", hue="smash_success", palette="coolwarm", alpha=0.6, edgecolor="k", legend=False, ax=ax)
+        success = smashes["smash_success"].astype(int).values
+        ax.scatter(
+            smashes.loc[success == 0, "landing_x_m"],
+            smashes.loc[success == 0, "landing_y_m"],
+            alpha=0.6, edgecolors="k", linewidths=0.5, label="0"
+        )
+        ax.scatter(
+            smashes.loc[success == 1, "landing_x_m"],
+            smashes.loc[success == 1, "landing_y_m"],
+            alpha=0.6, edgecolors="k", linewidths=0.5, label="1"
+        )
+
     draw_badminton_court(ax, mode="singles", width=COURT_WIDTH_M, length=COURT_LENGTH_M)
     ax.set_xlim(0, COURT_WIDTH_M)
     ax.set_ylim(0, COURT_LENGTH_M)
